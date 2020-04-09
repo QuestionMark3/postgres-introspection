@@ -10,37 +10,55 @@ router.get('/tables', async (req, res) => {
   const displayTableNames =
     "SELECT table_name FROM information_schema.tables WHERE table_type='BASE TABLE' AND table_schema='public'";
   const { rows } = await db.query(displayTableNames);
+  for (let i = 0; i < rows.length; i++) rows[i] = rows[i].table_name;
   res.status(200).send(rows);
 });
 
-// Get table schemas
-router.get('/schemas', async (req, res) => {
-  const tableList = [];
-  const displayTableNames =
-    "SELECT table_name FROM information_schema.tables WHERE table_type='BASE TABLE' AND table_schema='public'";
-  const { rows } = await db.query(displayTableNames);
+// Returns full PostgreSQL schema
+router.get('/schema', async (req, res) => {
+  const displayfk = `
+    SELECT pk.table_name, pk.primary_key, fk.foreign_keys, data.columns
 
-  // add table names to array
-  for (table of rows) {
-    tableList.push(table);
-  }
+    FROM (
+      SELECT  conrelid::regclass AS table_name,
+              substring(pg_get_constraintdef(oid), '\\((.*?)\\)')  AS primary_key
+      FROM pg_constraint
+      WHERE  contype = 'p' AND connamespace = 'public'::regnamespace
+    ) AS pk
 
-  // for each table, get all column details
-  let schemaArray = [];
-  for (let i = 0; i < tableList.length; i++) {
-    const table = tableList[i].table_name;
-    console.log(table);
-    const displayTableData = `select table_name, column_name, data_type, column_default, character_maximum_length, is_nullable
-    from INFORMATION_SCHEMA.COLUMNS where table_name = '${table}';`;
-    schemaData = await db.query(displayTableData);
-    schemaArray.push(schemaData.rows);
-  }
-  res.status(200).send(schemaArray);
-});
+    INNER JOIN (
+      SELECT conrelid::regclass AS table_name, json_agg(
+        json_build_object(
+          'name',            substring(pg_get_constraintdef(oid), '\\((.*?)\\)'),
+          'reference_table', substring(pg_get_constraintdef(oid), 'REFERENCES (.*?)\\('),
+          'reference_key',   substring(pg_get_constraintdef(oid), 'REFERENCES.*?\\((.*?)\\)')
+        )
+      ) AS foreign_keys
+      FROM pg_constraint
+      WHERE  contype = 'f' AND connamespace = 'public'::regnamespace
+      GROUP BY table_name
+    ) AS fk
+    ON pk.table_name = fk.table_name
 
-// Returns list of primary and foreign keys
-router.get('/fk', async (req, res) => {
-  const displayfk = `SELECT conrelid::regclass AS table_from, conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE  contype IN ('f', 'p ') AND connamespace = 'public'::regnamespace  -- your schema here ORDER  BY conrelid::regclass::text, contype DESC;`;
+    INNER JOIN (
+      SELECT tab.table_name, json_agg(
+        json_build_object(
+          'column_name',              col.column_name,
+          'data_type',                col.data_type,
+          'column_default',           col.column_default,
+          'character_maximum_length', col.character_maximum_length,
+          'is_nullable',              col.is_nullable
+        )
+      ) AS columns
+      FROM (
+        SELECT table_name FROM information_schema.tables
+        WHERE table_type='BASE TABLE' AND table_schema='public'
+      ) AS tab
+      INNER JOIN information_schema.columns AS col
+      ON tab.table_name = col.table_name
+      GROUP BY tab.table_name
+    ) AS data
+    ON data.table_name::regclass = pk.table_name`;
   const { rows } = await db.query(displayfk);
   res.status(200).send(rows);
 });
